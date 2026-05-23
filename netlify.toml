@@ -1,0 +1,30 @@
+# Configuración de despliegue para Netlify
+
+[build]
+  publish = "."
+  # No hay build step: este es un sitio estático
+
+[functions]
+  directory = "netlify/functions"
+  node_bundler = "esbuild"
+  # Asegura que @netlify/blobs se incluya correctamente en el bundle
+  included_files = []
+
+# Mapea /api/* -> /.netlify/functions/* (redirect del lado servidor, 200 = rewrite)
+# force = true evita que un archivo estático con el mismo nombre tape este routing
+[[redirects]]
+  from = "/api/*"
+  to = "/.netlify/functions/:splat"
+  status = 200
+  force = true
+
+# Evita caché agresivo del HTML para que los cambios se propaguen rápido
+[[headers]]
+  for = "/index.html"
+  [headers.values]
+    Cache-Control = "no-store"
+
+[[headers]]
+  for = "/"
+  [headers.values]
+    Cache-Control = "no-store"
