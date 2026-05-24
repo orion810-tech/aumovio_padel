@@ -1,26 +1,37 @@
+[README.md](https://github.com/user-attachments/files/28186847/README.md)
 # Aumovio Padel
 
 Aplicación web para organizar torneos de pádel con rotación automática de parejas y **sincronización en tiempo real entre dispositivos** vía Netlify Functions + Netlify Blobs (sin terceros, todo dentro de tu cuenta de Netlify).
 
-![Aumovio Padel](https://img.shields.io/badge/version-1.2-d4ff3f) ![License](https://img.shields.io/badge/license-MIT-737373)
+![Aumovio Padel](https://img.shields.io/badge/version-1.3-d4ff3f) ![License](https://img.shields.io/badge/license-MIT-737373)
 
 ## Características
 
 - 🔄 **Sincronización automática** — los datos viven en Netlify Blobs y se propagan entre dispositivos cada ~4 segundos
 - 🔐 **Login privado** (usuario y contraseña configurables)
+- 🛡️ **Gate admin** para acciones destructivas (borrar historial / reset total)
 - 🎾 **Rotación inteligente** de parejas y descansos para que todos jueguen con todos
 - 🔢 **Sin límite de puntos** — registras el resultado que quieras, terminas la ronda cuando quieras
 - ➕ **Añadir o quitar jugadores** durante el torneo
 - 📊 **Historial completo** de todos los torneos archivados
-- 🗑️ **Reset total** desde ajustes (también borra del servidor)
 - 📱 **Mobile-first** con tema oscuro
-- 🛡️ **Fallback local** — si la API no está disponible, la app sigue funcionando con localStorage
+- 🛟 **Fallback local** — si la API no está disponible, la app sigue funcionando con localStorage
 
 ## Credenciales
+
+### Login normal (acceso a la app)
 
 | Usuario   | Contraseña |
 |-----------|------------|
 | `aumovio` | `aumovio`  |
+
+### Gate admin (borrar historial / reset)
+
+| Usuario | Contraseña  |
+|---------|-------------|
+| `admin` | `padelrifa` |
+
+Las acciones de **eliminar un torneo del historial** y **borrar todos los datos** piden estas credenciales adicionales, así nadie las dispara por accidente.
 
 ---
 
@@ -94,6 +105,8 @@ En la cabecera siempre se ve el estado actual de sync:
 
 ## Cambiar credenciales
 
+### Login normal
+
 Edita `index.html`. Busca:
 
 ```js
@@ -102,7 +115,17 @@ if (user.trim().toLowerCase() === "aumovio" && pass === "aumovio") {
 
 Sustituye ambos `"aumovio"` por las nuevas credenciales.
 
-> ⚠️ La autenticación es client-side, sirve como puerta visual, no como seguridad real. Cualquiera con la URL y las credenciales puede ver los datos.
+### Credenciales admin (para borrar historial / reset)
+
+Edita `index.html`. Busca:
+
+```js
+if (user.trim().toLowerCase() === "admin" && pass === "padelrifa") {
+```
+
+Sustituye `"admin"` y `"padelrifa"` por las que prefieras.
+
+> ⚠️ Toda la autenticación es client-side, sirve como puerta visual, no como seguridad real. Cualquiera con la URL y las credenciales puede ver los datos. La gate admin solo protege contra borrados accidentales por parte de gente del equipo.
 
 ## Cambiar el token de la API
 
