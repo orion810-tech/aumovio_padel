@@ -525,7 +525,7 @@ function Login({ onLogin, syncMode, hasError }) {
           </button>
         </form>
       </div>
-      <footer className="text-center text-[var(--text-3)] text-[11px] mt-6">Aumovio Padel · v1.4</footer>
+      <footer className="text-center text-[var(--text-3)] text-[11px] mt-6">Aumovio Padel · v1.4.1</footer>
     </div>
   );
 }
@@ -590,7 +590,7 @@ function Home({ data, syncMode, hasError, onContinue, onNew, onHistory, onSettin
         </button>
       </div>
 
-      <footer className="text-center text-[var(--text-3)] text-[11px] mt-6">Aumovio Padel · v1.4</footer>
+      <footer className="text-center text-[var(--text-3)] text-[11px] mt-6">Aumovio Padel · v1.4.1</footer>
     </div>
   );
 }
@@ -872,63 +872,85 @@ function TournamentConfig({ players, courts, onAdd, onRemove, onCourtsChange, on
     if (players.some((p) => p.name.toLowerCase() === t.toLowerCase())) { setName(""); return; }
     onAdd(t); setName("");
   };
+  // Confirma: si hay un nombre tecleado pendiente, lo añade antes de cerrar
+  const accept = () => {
+    const t = name.trim();
+    if (t && !players.some((p) => p.name.toLowerCase() === t.toLowerCase())) {
+      onAdd(t);
+    }
+    onClose();
+  };
   const recommendedCourts = Math.max(1, Math.floor(players.length / 4));
   const isIdeal = players.length >= 4 && players.length % 4 === 0 && courts === players.length / 4;
   return (
     <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 backdrop-blur-sm pop-in" onClick={onClose}>
-      <div className="w-full max-w-md bg-[var(--surface)] border-t border-[var(--border)] rounded-t-3xl p-5 max-h-[85vh] overflow-y-auto safe-bottom" onClick={(e) => e.stopPropagation()}>
-        <div className="flex items-center justify-between mb-5">
+      <div className="w-full max-w-md bg-[var(--surface)] border-t border-[var(--border)] rounded-t-3xl flex flex-col max-h-[85vh]" onClick={(e) => e.stopPropagation()}>
+
+        {/* HEADER fijo */}
+        <div className="px-5 pt-5 pb-3 flex items-center justify-between shrink-0">
           <h3 className="font-display font-bold text-xl">Configuración</h3>
           <button onClick={onClose} className="text-[var(--text-3)] text-xl px-2" aria-label="Cerrar">✕</button>
         </div>
 
-        {/* Pistas */}
-        <SectionLabel>Pistas</SectionLabel>
-        <div className="bg-[var(--surface-2)] border border-[var(--border)] rounded-xl p-3 mb-2">
-          <div className="flex items-center justify-between">
-            <button onClick={() => onCourtsChange(Math.max(1, courts - 1))}
-              className="w-10 h-10 rounded-lg border border-[var(--border)] active:bg-[var(--surface)] text-lg" aria-label="Una pista menos">−</button>
-            <div className="text-center">
-              <div className="font-mono text-3xl font-bold leading-none">{courts}</div>
-              <div className="text-[10px] tracking-[0.2em] uppercase text-[var(--text-3)] mt-1.5">
-                {courts === 1 ? "pista" : "pistas"}
+        {/* CONTENIDO scrollable */}
+        <div className="px-5 pb-2 flex-1 overflow-y-auto">
+          {/* Pistas */}
+          <SectionLabel>Pistas</SectionLabel>
+          <div className="bg-[var(--surface-2)] border border-[var(--border)] rounded-xl p-3 mb-2">
+            <div className="flex items-center justify-between">
+              <button onClick={() => onCourtsChange(Math.max(1, courts - 1))}
+                className="w-10 h-10 rounded-lg border border-[var(--border)] active:bg-[var(--surface)] text-lg" aria-label="Una pista menos">−</button>
+              <div className="text-center">
+                <div className="font-mono text-3xl font-bold leading-none">{courts}</div>
+                <div className="text-[10px] tracking-[0.2em] uppercase text-[var(--text-3)] mt-1.5">
+                  {courts === 1 ? "pista" : "pistas"}
+                </div>
               </div>
+              <button onClick={() => onCourtsChange(courts + 1)}
+                className="w-10 h-10 rounded-lg border border-[var(--border)] active:bg-[var(--surface)] text-lg" aria-label="Una pista más">+</button>
             </div>
-            <button onClick={() => onCourtsChange(courts + 1)}
-              className="w-10 h-10 rounded-lg border border-[var(--border)] active:bg-[var(--surface)] text-lg" aria-label="Una pista más">+</button>
           </div>
-        </div>
-        <p className={`text-[11px] leading-relaxed mb-5 ${isIdeal ? "text-[var(--lime)]" : "text-[var(--text-3)]"}`}>
-          {isIdeal
-            ? "✓ Configuración óptima: nadie se sienta, todos juegan con todos."
-            : players.length >= 4
-              ? `Recomendado: ${recommendedCourts} pista${recommendedCourts !== 1 ? "s" : ""} con ${players.length} jugadores${players.length % 4 !== 0 ? ` (${4 - (players.length % 4)} descansa${4 - (players.length % 4) !== 1 ? "n" : ""} por ronda)` : ""}.`
-              : "Añade al menos 4 jugadores."}
-        </p>
+          <p className={`text-[11px] leading-relaxed mb-5 ${isIdeal ? "text-[var(--lime)]" : "text-[var(--text-3)]"}`}>
+            {isIdeal
+              ? "✓ Configuración óptima: nadie se sienta, todos juegan con todos."
+              : players.length >= 4
+                ? `Recomendado: ${recommendedCourts} pista${recommendedCourts !== 1 ? "s" : ""} con ${players.length} jugadores${players.length % 4 !== 0 ? ` (${4 - (players.length % 4)} descansa${4 - (players.length % 4) !== 1 ? "n" : ""} por ronda)` : ""}.`
+                : "Añade al menos 4 jugadores."}
+          </p>
 
-        {/* Jugadores */}
-        <SectionLabel>Jugadores · {players.length}</SectionLabel>
-        <div className="flex gap-2 mb-3">
-          <input ref={inputRef} value={name} onChange={(e) => setName(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter") add(); }} placeholder="Nuevo jugador"
-            className="flex-1 bg-[var(--surface-2)] border border-[var(--border)] rounded-xl px-4 py-3 focus:border-[var(--lime)] focus:outline-none"/>
-          <button onClick={add} disabled={!name.trim()}
-            className="px-5 rounded-xl bg-[var(--lime)] text-black font-semibold disabled:opacity-30 active:scale-95 transition-transform">+</button>
+          {/* Jugadores */}
+          <SectionLabel>Jugadores · {players.length}</SectionLabel>
+          <div className="flex gap-2 mb-3">
+            <input ref={inputRef} value={name} onChange={(e) => setName(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") add(); }} placeholder="Nuevo jugador"
+              className="flex-1 bg-[var(--surface-2)] border border-[var(--border)] rounded-xl px-4 py-3 focus:border-[var(--lime)] focus:outline-none"/>
+            <button onClick={add} disabled={!name.trim()}
+              className="px-5 rounded-xl bg-[var(--lime)] text-black font-semibold disabled:opacity-30 active:scale-95 transition-transform">+</button>
+          </div>
+          <p className="text-xs text-[var(--text-3)] mb-3 leading-relaxed">Los cambios de pistas o jugadores se aplican a partir de la próxima ronda.</p>
+          <ul className="space-y-1.5">
+            {players.map((p, i) => (
+              <li key={p.id} className="flex items-center justify-between bg-[var(--surface-2)] border border-[var(--border)] rounded-xl px-3 py-2.5">
+                <div className="flex items-center gap-3">
+                  <span className="font-mono text-[11px] text-[var(--text-3)] w-5">{String(i + 1).padStart(2, "0")}</span>
+                  <span>{p.name}</span>
+                </div>
+                <button onClick={() => {
+                  if (confirm(`¿Eliminar a ${p.name}? Sus puntos se mantienen, pero ya no jugará más rondas.`)) onRemove(p.id);
+                }} className="text-[var(--text-3)] hover:text-[var(--red)] text-sm px-2" aria-label={`Eliminar ${p.name}`}>✕</button>
+              </li>
+            ))}
+          </ul>
         </div>
-        <p className="text-xs text-[var(--text-3)] mb-3 leading-relaxed">Los cambios de pistas o jugadores se aplican a partir de la próxima ronda.</p>
-        <ul className="space-y-1.5">
-          {players.map((p, i) => (
-            <li key={p.id} className="flex items-center justify-between bg-[var(--surface-2)] border border-[var(--border)] rounded-xl px-3 py-2.5">
-              <div className="flex items-center gap-3">
-                <span className="font-mono text-[11px] text-[var(--text-3)] w-5">{String(i + 1).padStart(2, "0")}</span>
-                <span>{p.name}</span>
-              </div>
-              <button onClick={() => {
-                if (confirm(`¿Eliminar a ${p.name}? Sus puntos se mantienen, pero ya no jugará más rondas.`)) onRemove(p.id);
-              }} className="text-[var(--text-3)] hover:text-[var(--red)] text-sm px-2" aria-label={`Eliminar ${p.name}`}>✕</button>
-            </li>
-          ))}
-        </ul>
+
+        {/* FOOTER sticky con botón Aceptar */}
+        <div className="px-5 pt-3 safe-bottom border-t border-[var(--border)] shrink-0 bg-[var(--surface)]">
+          <button onClick={accept}
+            className="w-full py-3.5 rounded-xl bg-[var(--lime)] text-black font-display font-bold text-lg active:scale-[0.98] transition-transform tracking-tight">
+            Aceptar →
+          </button>
+        </div>
+
       </div>
     </div>
   );
@@ -1401,7 +1423,7 @@ function Settings({ onBack, onLogout, onReset, syncMode, lastError }) {
           </div>
         </button>
       </div>
-      <footer className="text-center text-[var(--text-3)] text-[11px] pb-6">Aumovio Padel · v1.4</footer>
+      <footer className="text-center text-[var(--text-3)] text-[11px] pb-6">Aumovio Padel · v1.4.1</footer>
 
       {askingAdmin && (
         <AdminGate
