@@ -1,9 +1,9 @@
-[README.md](https://github.com/user-attachments/files/28349015/README.md)
+[README.md](https://github.com/user-attachments/files/28349443/README.md)
 # Aumovio Padel
 
 Aplicación web para organizar torneos de pádel con rotación automática de parejas y **sincronización en tiempo real entre dispositivos** vía Netlify Functions + Netlify Blobs (sin terceros, todo dentro de tu cuenta de Netlify).
 
-![Aumovio Padel](https://img.shields.io/badge/version-1.5-d4ff3f) ![License](https://img.shields.io/badge/license-MIT-737373)
+![Aumovio Padel](https://img.shields.io/badge/version-1.6-d4ff3f) ![License](https://img.shields.io/badge/license-MIT-737373)
 
 ## Características
 
@@ -13,6 +13,7 @@ Aplicación web para organizar torneos de pádel con rotación automática de pa
 - 🎾 **Rotación inteligente** de parejas y descansos para que todos jueguen con todos
 - 🚫 **Nadie descansa dos veces seguidas** — quien descansa una ronda tiene prioridad para jugar la siguiente
 - ✏️ **Puntuaciones editables en cualquier ronda** — navega entre rondas (incluidas las finalizadas) y corrige marcadores por pista; la clasificación se recalcula al instante
+- 📝 **Torneos del historial editables (con admin)** — corrige nombre y marcadores de torneos ya archivados; el campeón y la clasificación se recalculan automáticamente
 - 🔢 **Sin límite de puntos** — registras el resultado que quieras, terminas la ronda cuando quieras
 - ➕ **Añadir o quitar jugadores y pistas** durante el torneo
 - 📊 **Historial completo** de todos los torneos archivados
