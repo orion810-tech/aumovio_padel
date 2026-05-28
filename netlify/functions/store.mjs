@@ -80,6 +80,13 @@ export default async (request) => {
         case "delete-history":
           state.history = state.history.filter((t) => t.id !== body.id);
           break;
+        case "update-history":
+          if (body.tournament) {
+            state.history = state.history.map((t) =>
+              t.id === body.tournament.id ? body.tournament : t
+            );
+          }
+          break;
         case "reset":
           state.active = null;
           state.history = [];
