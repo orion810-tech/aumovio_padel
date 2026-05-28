@@ -155,9 +155,22 @@ function generateRound(players, courts, completedRounds) {
   let numPlay = Math.min(players.length, maxPlay);
   numPlay = Math.floor(numPlay / 4) * 4;
   if (numPlay < 4) return null;
-  const sorted = shuffle([...players]).sort(
-    (a, b) => (history.sitOuts[b.id] || 0) - (history.sitOuts[a.id] || 0)
-  );
+
+  // Regla: nadie descansa dos veces seguidas. Los jugadores que descansaron en la
+  // última ronda tienen prioridad ABSOLUTA para jugar esta. Solo se rompe la regla
+  // si es matemáticamente imposible (más asientos de descanso que jugadores elegibles,
+  // p.ej. config degenerada con >50% descansando).
+  const lastRound = completedRounds.length ? completedRounds[completedRounds.length - 1] : null;
+  const satOutLast = new Set(lastRound ? (lastRound.sittingOut || []) : []);
+
+  const sorted = shuffle([...players]).sort((a, b) => {
+    // 1) Prioridad a quien descansó la última ronda → juega esta
+    const aLast = satOutLast.has(a.id) ? 1 : 0;
+    const bLast = satOutLast.has(b.id) ? 1 : 0;
+    if (aLast !== bLast) return bLast - aLast;
+    // 2) Entre el resto, quien ha descansado más veces en total juega primero
+    return (history.sitOuts[b.id] || 0) - (history.sitOuts[a.id] || 0);
+  });
   const playing = sorted.slice(0, numPlay).map((p) => p.id);
   const sittingOut = sorted.slice(numPlay).map((p) => p.id);
 
@@ -525,7 +538,7 @@ function Login({ onLogin, syncMode, hasError }) {
           </button>
         </form>
       </div>
-      <footer className="text-center text-[var(--text-3)] text-[11px] mt-6">Aumovio Padel · v1.4.1</footer>
+      <footer className="text-center text-[var(--text-3)] text-[11px] mt-6">Aumovio Padel · v1.5</footer>
     </div>
   );
 }
@@ -590,7 +603,7 @@ function Home({ data, syncMode, hasError, onContinue, onNew, onHistory, onSettin
         </button>
       </div>
 
-      <footer className="text-center text-[var(--text-3)] text-[11px] mt-6">Aumovio Padel · v1.4.1</footer>
+      <footer className="text-center text-[var(--text-3)] text-[11px] mt-6">Aumovio Padel · v1.5</footer>
     </div>
   );
 }
@@ -785,20 +798,31 @@ function MatchCard({ match, players, onScoreChange }) {
 }
 
 // ============================================================
-// ROUND VIEW
+// ROUND VIEW (con navegador de rondas para editar cualquiera)
 // ============================================================
-function RoundView({ round, players, onScoreChange, roundNum }) {
+function RoundView({ round, players, onScoreChange, roundNum, totalRounds, isCurrent, onPrev, onNext }) {
   const getName = (id) => players.find((p) => p.id === id)?.name || "—";
   return (
     <div className="space-y-4">
-      <div className="flex items-end justify-between px-1">
-        <div>
-          <div className="text-[10px] tracking-[0.25em] uppercase text-[var(--text-3)] mb-1">En curso</div>
-          <h2 className="font-display text-[2.4rem] leading-none font-extrabold tracking-tight">
+      {/* Navegador de rondas */}
+      <div className="flex items-center justify-between gap-2 px-1">
+        <button onClick={onPrev} disabled={roundNum <= 1}
+          className="w-10 h-10 rounded-xl border border-[var(--border)] flex items-center justify-center text-lg text-[var(--text-2)] disabled:opacity-25 active:bg-[var(--surface-2)]"
+          aria-label="Ronda anterior">←</button>
+        <div className="text-center flex-1">
+          <div className={`text-[10px] tracking-[0.25em] uppercase mb-0.5 ${isCurrent ? "text-[var(--lime)]" : "text-[var(--text-3)]"}`}>
+            {isCurrent ? "En curso" : "Finalizada · editable"}
+          </div>
+          <h2 className="font-display text-[2rem] leading-none font-extrabold tracking-tight">
             Ronda <span className="text-[var(--lime)] font-mono">{String(roundNum).padStart(2, "0")}</span>
+            <span className="text-[var(--text-3)] font-mono text-base"> / {String(totalRounds).padStart(2, "0")}</span>
           </h2>
         </div>
+        <button onClick={onNext} disabled={roundNum >= totalRounds}
+          className="w-10 h-10 rounded-xl border border-[var(--border)] flex items-center justify-center text-lg text-[var(--text-2)] disabled:opacity-25 active:bg-[var(--surface-2)]"
+          aria-label="Ronda siguiente">→</button>
       </div>
+
       <div className="space-y-3">
         {round.matches.map((m) => (
           <MatchCard key={m.id} match={m} players={players}
@@ -1035,6 +1059,10 @@ function Tournament({ active, setActive, onFinish, onBack, syncMode, hasError })
   const { players, courts, rounds, currentRoundIndex } = active;
   const [tab, setTab] = useState("round");
   const [showPlayers, setShowPlayers] = useState(false);
+  const [viewRound, setViewRound] = useState(currentRoundIndex);
+
+  // Cuando avanza la ronda actual (tras Terminar ronda), seguir a esa ronda.
+  useEffect(() => { setViewRound(currentRoundIndex); }, [currentRoundIndex]);
 
   // Safety net: si por algún motivo la ronda actual no existe (datos viejos sincronizados,
   // estado corrupto), genérala. En el flujo normal esto NO se dispara porque endRound y
@@ -1050,13 +1078,16 @@ function Tournament({ active, setActive, onFinish, onBack, syncMode, hasError })
     });
   }, [currentRoundIndex, players.length]);
 
-  const round = rounds[currentRoundIndex];
+  const isCurrent = viewRound === currentRoundIndex;
+  const round = rounds[viewRound];
 
+  // Edita la ronda que se está viendo (puede ser una anterior). Las puntuaciones
+  // de rondas pasadas son editables; al cambiarlas se recalcula la clasificación.
   const updateScore = (matchId, team, val) => {
     setActive((prev) => ({
       ...prev,
       rounds: prev.rounds.map((r, idx) => {
-        if (idx !== prev.currentRoundIndex) return r;
+        if (idx !== viewRound) return r;
         return {
           ...r,
           matches: r.matches.map((m) =>
@@ -1148,7 +1179,11 @@ function Tournament({ active, setActive, onFinish, onBack, syncMode, hasError })
 
       <main className="flex-1 px-5 py-4 pb-32">
         {tab === "round" ? (
-          <RoundView round={round} players={players} onScoreChange={updateScore} roundNum={currentRoundIndex + 1} />
+          <RoundView round={round} players={players} onScoreChange={updateScore}
+            roundNum={viewRound + 1} totalRounds={currentRoundIndex + 1} isCurrent={isCurrent}
+            onPrev={() => { setViewRound((v) => Math.max(0, v - 1)); window.scrollTo({ top: 0, behavior: "smooth" }); }}
+            onNext={() => { setViewRound((v) => Math.min(currentRoundIndex, v + 1)); window.scrollTo({ top: 0, behavior: "smooth" }); }}
+          />
         ) : (
           <div className="space-y-4">
             <div className="flex items-end justify-between px-1">
@@ -1165,7 +1200,7 @@ function Tournament({ active, setActive, onFinish, onBack, syncMode, hasError })
 
       <div className="fixed bottom-0 left-0 right-0 bg-gradient-to-t from-[var(--bg)] via-[var(--bg)] to-transparent pt-4 px-5 safe-bottom z-20">
         <div className="max-w-md mx-auto space-y-2">
-          {tab === "round" && (
+          {tab === "round" && isCurrent && (
             <>
               <div className="flex items-center justify-between text-xs text-[var(--text-3)] mb-1 px-1">
                 <span><span className="text-[var(--text)] font-mono">{matchesWithScores}</span>/{round.matches.length} partidos registrados</span>
@@ -1175,6 +1210,17 @@ function Tournament({ active, setActive, onFinish, onBack, syncMode, hasError })
               <button onClick={endRound}
                 className="w-full py-4 rounded-xl bg-[var(--lime)] text-black font-display font-bold text-lg active:scale-[0.98] transition-transform tracking-tight">
                 Terminar ronda →
+              </button>
+            </>
+          )}
+          {tab === "round" && !isCurrent && (
+            <>
+              <div className="text-xs text-[var(--text-3)] mb-1 px-1 text-center">
+                Editando una ronda finalizada · los cambios recalculan la clasificación
+              </div>
+              <button onClick={() => { setViewRound(currentRoundIndex); window.scrollTo({ top: 0, behavior: "smooth" }); }}
+                className="w-full py-4 rounded-xl bg-[var(--surface)] border border-[var(--lime)]/40 text-[var(--lime)] font-display font-bold text-lg active:scale-[0.98] transition-transform tracking-tight">
+                Ir a ronda actual →
               </button>
             </>
           )}
@@ -1423,7 +1469,7 @@ function Settings({ onBack, onLogout, onReset, syncMode, lastError }) {
           </div>
         </button>
       </div>
-      <footer className="text-center text-[var(--text-3)] text-[11px] pb-6">Aumovio Padel · v1.4.1</footer>
+      <footer className="text-center text-[var(--text-3)] text-[11px] pb-6">Aumovio Padel · v1.5</footer>
 
       {askingAdmin && (
         <AdminGate
