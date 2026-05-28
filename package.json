@@ -1,6 +1,6 @@
 {
   "name": "aumovio-padel",
-  "version": "1.4.1",
+  "version": "1.5.0",
   "private": true,
   "type": "module",
   "description": "Aumovio Padel — organizador de torneos con sincronización en tiempo real vía Netlify",
