@@ -6,8 +6,9 @@
 <meta name="theme-color" content="#0a0a0a" />
 <title>Aumovio Padel</title>
 <script src="https://cdn.tailwindcss.com"></script>
-<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<!-- Versiones FIJADAS a propósito: un cambio de major en el CDN rompe la app en producción -->
+<script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
 <script src="https://unpkg.com/@babel/standalone@7/babel.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -54,6 +55,8 @@
   .rise-in { animation: rise 0.35s ease-out both; }
   @keyframes pulse-dot { 0%,100%{opacity:1} 50%{opacity:.3} }
   .pulse-dot { animation: pulse-dot 1.6s ease-in-out infinite; }
+  @keyframes flash-red { 0%,100%{background:rgba(239,68,68,0.10)} 50%{background:rgba(239,68,68,0.28)} }
+  .flash-red { animation: flash-red 1s ease-in-out infinite; }
   .safe-bottom { padding-bottom: max(env(safe-area-inset-bottom), 1rem); }
 </style>
 </head>
@@ -63,19 +66,17 @@
 
 // ╔══════════════════════════════════════════════════════════════╗
 // ║ Configuración de sincronización                                ║
-// ║                                                                ║
 // ║ La app llama a /api/store (Netlify Function). Si la API no     ║
-// ║ está disponible (ej. abriendo el HTML directamente, sin        ║
-// ║ desplegar a Netlify), la app cae en modo local automáticamente.║
+// ║ está disponible, la app cae en modo local automáticamente.     ║
 // ╚══════════════════════════════════════════════════════════════╝
 const API_URL = "/api/store";
 const API_TOKEN = "aumovio";          // debe coincidir con el TOKEN de store.mjs
-const POLL_MS = 4000;                  // refresca cada 4s cuando la pestaña está visible
+const POLL_MS = 4000;
 
 const { useState, useEffect, useMemo, useRef } = React;
 
 // ============================================================
-// LOCAL STORAGE (fallback)
+// LOCAL STORAGE (fallback) — claves sin cambios: el historial se conserva
 // ============================================================
 const K_AUTH = "aumovio_auth_v1";
 const K_DATA = "aumovio_data_v2";
@@ -90,6 +91,21 @@ function lsDel(key) { try { localStorage.removeItem(key); } catch {} }
 // HELPERS
 // ============================================================
 const uid = () => Math.random().toString(36).slice(2, 10);
+
+const FORMATS = {
+  americano: {
+    label: "Americano",
+    short: "Americano",
+    desc: "Parejas al azar cada ronda, minimizando repeticiones. Todos juegan con todos.",
+  },
+  mexicano: {
+    label: "Mexicano",
+    short: "Mexicano",
+    desc: "Las parejas se forman por clasificación: 1º+4º vs 2º+3º. Partidos más igualados.",
+  },
+};
+const getFormat = (t) => (t && t.format === "mexicano" ? "mexicano" : "americano");
+const getDuration = (t) => (t && typeof t.roundDurationMin === "number" ? t.roundDurationMin : 0);
 
 function shuffle(arr) {
   const a = [...arr];
@@ -123,7 +139,7 @@ function calcRoundsHistory(rounds) {
 function calcStandings(players, rounds) {
   const stats = {};
   players.forEach((p) => {
-    stats[p.id] = { id: p.id, name: p.name, points: 0, played: 0, won: 0, lost: 0, diff: 0 };
+    stats[p.id] = { id: p.id, name: p.name, absent: !!p.absent, points: 0, played: 0, won: 0, lost: 0, diff: 0 };
   });
   rounds.forEach((r) => {
     r.matches.forEach((m) => {
@@ -148,32 +164,63 @@ function calcStandings(players, rounds) {
   });
 }
 
-function generateRound(players, courts, completedRounds) {
-  if (players.length < 4) return null;
+// ============================================================
+// GENERACIÓN DE RONDAS (Americano / Mexicano)
+// ============================================================
+function generateRound(players, courts, completedRounds, format) {
+  const fmt = format === "mexicano" ? "mexicano" : "americano";
+
+  // Los jugadores marcados como ausentes no entran en la ronda,
+  // pero conservan sus puntos en la clasificación.
+  const available = players.filter((p) => !p.absent);
+  if (available.length < 4) return null;
+
   const history = calcRoundsHistory(completedRounds);
   const maxPlay = courts * 4;
-  let numPlay = Math.min(players.length, maxPlay);
+  let numPlay = Math.min(available.length, maxPlay);
   numPlay = Math.floor(numPlay / 4) * 4;
   if (numPlay < 4) return null;
 
-  // Regla: nadie descansa dos veces seguidas. Los jugadores que descansaron en la
-  // última ronda tienen prioridad ABSOLUTA para jugar esta. Solo se rompe la regla
-  // si es matemáticamente imposible (más asientos de descanso que jugadores elegibles,
-  // p.ej. config degenerada con >50% descansando).
+  // --- QUIÉN JUEGA (común a los dos formatos) ---
+  // Regla: nadie descansa dos veces seguidas. Quien descansó la última ronda
+  // tiene prioridad absoluta para jugar esta. Entre el resto, juega antes quien
+  // más veces ha descansado en total.
   const lastRound = completedRounds.length ? completedRounds[completedRounds.length - 1] : null;
   const satOutLast = new Set(lastRound ? (lastRound.sittingOut || []) : []);
-
-  const sorted = shuffle([...players]).sort((a, b) => {
-    // 1) Prioridad a quien descansó la última ronda → juega esta
+  const sorted = shuffle([...available]).sort((a, b) => {
     const aLast = satOutLast.has(a.id) ? 1 : 0;
     const bLast = satOutLast.has(b.id) ? 1 : 0;
     if (aLast !== bLast) return bLast - aLast;
-    // 2) Entre el resto, quien ha descansado más veces en total juega primero
     return (history.sitOuts[b.id] || 0) - (history.sitOuts[a.id] || 0);
   });
-  const playing = sorted.slice(0, numPlay).map((p) => p.id);
+  const playingPlayers = sorted.slice(0, numPlay);
   const sittingOut = sorted.slice(numPlay).map((p) => p.id);
+  const base = { id: uid(), sittingOut, completed: false, format: fmt, timerStartedAt: null, timerPausedElapsed: null };
 
+  // --- MEXICANO: emparejar por clasificación (1º+4º vs 2º+3º) ---
+  if (fmt === "mexicano") {
+    const standings = calcStandings(players, completedRounds);
+    const rankOf = {};
+    standings.forEach((s, i) => { rankOf[s.id] = i; });
+    const ranked = [...playingPlayers].sort(
+      (a, b) => (rankOf[a.id] ?? 9999) - (rankOf[b.id] ?? 9999)
+    );
+    const matches = [];
+    for (let i = 0; i < ranked.length; i += 4) {
+      const g = ranked.slice(i, i + 4);
+      matches.push({
+        id: uid(),
+        court: i / 4 + 1,
+        teamA: [g[0].id, g[3].id],   // 1º + 4º del grupo
+        teamB: [g[1].id, g[2].id],   // 2º + 3º del grupo
+        scoreA: null, scoreB: null,
+      });
+    }
+    return { ...base, matches };
+  }
+
+  // --- AMERICANO: minimizar repeticiones de pareja y rival ---
+  const playing = playingPlayers.map((p) => p.id);
   let best = null;
   let bestScore = Infinity;
   for (let t = 0; t < 1200; t++) {
@@ -190,7 +237,7 @@ function generateRound(players, courts, completedRounds) {
     }
     if (score < bestScore) { bestScore = score; best = matches; if (bestScore === 0) break; }
   }
-  return { id: uid(), matches: best, sittingOut, completed: false };
+  return { ...base, matches: best };
 }
 
 function buildArchived(active) {
@@ -203,6 +250,8 @@ function buildArchived(active) {
     finishedAt: Date.now(),
     players: active.players,
     courts: active.courts,
+    format: getFormat(active),
+    roundDurationMin: getDuration(active),
     rounds: active.rounds,
     standings,
     winner: standings[0] || null,
@@ -218,20 +267,44 @@ function defaultName() {
   return "Torneo " + d.toLocaleDateString("es-ES", { day: "2-digit", month: "short" });
 }
 
+// Aviso sonoro + vibración al acabar la ronda. Sin ficheros externos: Web Audio.
+function alertEndOfRound() {
+  try {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (Ctx) {
+      const ctx = new Ctx();
+      const t0 = ctx.currentTime;
+      [0, 0.28, 0.56].forEach((off) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = "sine";
+        osc.frequency.setValueAtTime(880, t0 + off);
+        gain.gain.setValueAtTime(0.0001, t0 + off);
+        gain.gain.exponentialRampToValueAtTime(0.35, t0 + off + 0.02);
+        gain.gain.exponentialRampToValueAtTime(0.0001, t0 + off + 0.22);
+        osc.connect(gain); gain.connect(ctx.destination);
+        osc.start(t0 + off); osc.stop(t0 + off + 0.24);
+      });
+      setTimeout(() => { try { ctx.close(); } catch {} }, 1500);
+    }
+  } catch {}
+  try { if (navigator.vibrate) navigator.vibrate([250, 120, 250, 120, 500]); } catch {}
+}
+
 // ============================================================
 // DATA STORE — capa de abstracción Netlify Blobs / localStorage
 // ============================================================
 function createDataStore() {
   const store = {
-    mode: "init",                                       // 'init' | 'netlify' | 'local' | 'error'
+    mode: "init",
     synced: false,
     state: { active: null, history: [], updatedAt: 0 },
     listeners: new Set(),
     pollTimer: null,
     visibilityHandler: null,
     lastError: null,
-    inFlight: 0,                                        // contador de escrituras pendientes (queue depth)
-    _writeChain: Promise.resolve(),                     // cadena de promesas para serializar POSTs
+    inFlight: 0,
+    _writeChain: Promise.resolve(),
 
     subscribe(cb) {
       this.listeners.add(cb);
@@ -274,13 +347,10 @@ function createDataStore() {
 
     startPolling() {
       const tick = async () => {
-        if (this.inFlight > 0) return;                  // hay writes pendientes, no machacar
+        if (this.inFlight > 0) return;
         if (document.hidden) return;
         try {
           const remote = await this.apiGet();
-          // Comparar datos reales, no solo timestamps. Evita re-renders innecesarios
-          // que pueden causar parpadeo en la UI cuando el servidor devuelve los mismos
-          // datos pero con un updatedAt ligeramente posterior.
           const sameData =
             JSON.stringify(remote.active) === JSON.stringify(this.state.active) &&
             JSON.stringify(remote.history) === JSON.stringify(this.state.history);
@@ -326,10 +396,9 @@ function createDataStore() {
       return await r.json();
     },
 
-    // Centraliza la escritura: serializa los POSTs en una cadena para que nunca
-    // se solapen, y NO sobrescribe el estado local con la respuesta (el optimistic
-    // update ya tiene los datos correctos; el polling sincroniza cambios remotos).
-    // Esto elimina los blips causados por respuestas que llegan fuera de orden.
+    // Serializa los POSTs en una cadena para que nunca se solapen, y NO sobrescribe
+    // el estado local con la respuesta (el optimistic update ya tiene los datos
+    // correctos). Esto elimina los blips por respuestas fuera de orden.
     _enqueueWrite(buildBody, label) {
       if (this.mode !== "netlify") return Promise.resolve();
       this.inFlight++;
@@ -348,10 +417,8 @@ function createDataStore() {
       return this._writeChain;
     },
 
-    // ============= writes =============
     setActive(updater) {
       const newActive = typeof updater === "function" ? updater(this.state.active) : updater;
-      // Optimistic local update con timestamp local
       this.state = { ...this.state, active: newActive, updatedAt: Date.now() };
       this.notify();
       if (this.mode !== "netlify") { this.persistLocal(); return Promise.resolve(); }
@@ -372,10 +439,7 @@ function createDataStore() {
       };
       this.notify();
       if (this.mode !== "netlify") { this.persistLocal(); return Promise.resolve(); }
-      return this._enqueueWrite(
-        { action: "archive", archived },
-        "archive"
-      );
+      return this._enqueueWrite({ action: "archive", archived }, "archive");
     },
 
     deleteHistoryItem(id) {
@@ -386,14 +450,9 @@ function createDataStore() {
       };
       this.notify();
       if (this.mode !== "netlify") { this.persistLocal(); return Promise.resolve(); }
-      return this._enqueueWrite(
-        { action: "delete-history", id },
-        "deleteHistory"
-      );
+      return this._enqueueWrite({ action: "delete-history", id }, "deleteHistory");
     },
 
-    // Edita un torneo archivado (p.ej. corregir marcadores). Recalcula clasificación
-    // y campeón automáticamente a partir de las rondas modificadas.
     updateHistoryItem(id, updater) {
       const current = this.state.history.find((t) => t.id === id);
       if (!current) return Promise.resolve();
@@ -407,20 +466,14 @@ function createDataStore() {
       };
       this.notify();
       if (this.mode !== "netlify") { this.persistLocal(); return Promise.resolve(); }
-      return this._enqueueWrite(
-        { action: "update-history", tournament: updated },
-        "updateHistory"
-      );
+      return this._enqueueWrite({ action: "update-history", tournament: updated }, "updateHistory");
     },
 
     resetAll() {
       this.state = { active: null, history: [], updatedAt: Date.now() };
       this.notify();
       if (this.mode !== "netlify") { lsDel(K_DATA); return Promise.resolve(); }
-      return this._enqueueWrite(
-        { action: "reset" },
-        "reset"
-      );
+      return this._enqueueWrite({ action: "reset" }, "reset");
     },
   };
   return store;
@@ -469,13 +522,8 @@ function SyncBadge({ mode, hasError }) {
   }
   return (
     <div className="flex items-center gap-1.5">
-      <span
-        className={`w-1.5 h-1.5 rounded-full ${cfg.pulse ? "pulse-dot" : ""}`}
-        style={{ background: cfg.dot }}
-      />
-      <span className="text-[10px] tracking-[0.15em] uppercase text-[var(--text-3)] font-mono">
-        {cfg.label}
-      </span>
+      <span className={`w-1.5 h-1.5 rounded-full ${cfg.pulse ? "pulse-dot" : ""}`} style={{ background: cfg.dot }} />
+      <span className="text-[10px] tracking-[0.15em] uppercase text-[var(--text-3)] font-mono">{cfg.label}</span>
     </div>
   );
 }
@@ -501,6 +549,136 @@ function BackHeader({ onBack, title, right }) {
       </div>
       {right}
     </header>
+  );
+}
+
+// Selector segmentado de formato (Americano / Mexicano)
+function FormatPicker({ value, onChange }) {
+  return (
+    <div>
+      <div className="flex gap-1 bg-[var(--surface)] border border-[var(--border)] rounded-xl p-1">
+        {Object.keys(FORMATS).map((k) => (
+          <button key={k} onClick={() => onChange(k)}
+            className={`flex-1 py-2.5 rounded-lg text-sm font-semibold transition-colors ${
+              value === k ? "bg-[var(--lime)] text-black" : "text-[var(--text-3)] active:bg-[var(--surface-2)]"
+            }`}>
+            {FORMATS[k].label}
+          </button>
+        ))}
+      </div>
+      <p className="text-[11px] text-[var(--text-3)] mt-2 leading-relaxed px-1">{FORMATS[value].desc}</p>
+    </div>
+  );
+}
+
+// Selector de duración de ronda (0 = sin límite)
+function DurationPicker({ value, onChange }) {
+  const opts = [0, 10, 12, 15, 20];
+  return (
+    <div className="flex gap-1 bg-[var(--surface)] border border-[var(--border)] rounded-xl p-1">
+      {opts.map((m) => (
+        <button key={m} onClick={() => onChange(m)}
+          className={`flex-1 py-2.5 rounded-lg text-sm font-semibold font-mono transition-colors ${
+            value === m ? "bg-[var(--lime)] text-black" : "text-[var(--text-3)] active:bg-[var(--surface-2)]"
+          }`}>
+          {m === 0 ? "OFF" : m + "′"}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// ============================================================
+// ROUND TIMER — el reloj vive en cada dispositivo, solo se
+// sincroniza el instante de arranque (timerStartedAt)
+// ============================================================
+function RoundTimer({ round, durationMin, onStart, onPause, onResume, onReset, onAddMinute }) {
+  const durationMs = durationMin * 60000;
+  const [now, setNow] = useState(() => Date.now());
+  const firedRef = useRef(false);
+
+  const running = round.timerStartedAt != null && round.timerPausedElapsed == null;
+  const paused = round.timerPausedElapsed != null;
+  const idle = !running && !paused;
+
+  useEffect(() => {
+    if (!running) return;
+    setNow(Date.now());
+    const t = setInterval(() => setNow(Date.now()), 250);
+    return () => clearInterval(t);
+  }, [running, round.timerStartedAt]);
+
+  useEffect(() => { firedRef.current = false; }, [round.id, round.timerStartedAt]);
+
+  const elapsed = running ? now - round.timerStartedAt : (paused ? round.timerPausedElapsed : 0);
+  const remaining = Math.max(0, durationMs - elapsed);
+  const isUp = !idle && remaining <= 0;
+
+  useEffect(() => {
+    if (isUp && !firedRef.current) { firedRef.current = true; alertEndOfRound(); }
+  }, [isUp]);
+
+  const mins = Math.floor(remaining / 60000);
+  const secs = Math.floor((remaining % 60000) / 1000);
+  const pct = durationMs > 0 ? Math.max(0, Math.min(100, (remaining / durationMs) * 100)) : 0;
+  const warn = !isUp && remaining <= 60000 && !idle;
+
+  const barColor = isUp ? "var(--red)" : warn ? "var(--orange)" : "var(--lime)";
+  const numColor = isUp ? "text-[var(--red)]" : warn ? "text-[var(--orange)]" : "text-[var(--text)]";
+
+  return (
+    <div className={`rounded-2xl border overflow-hidden ${isUp ? "border-[var(--red)]/40 flash-red" : "border-[var(--border)] bg-[var(--surface)]"}`}>
+      <div className="px-4 pt-3 pb-2 flex items-center justify-between">
+        <span className="text-[10px] tracking-[0.2em] uppercase text-[var(--text-3)]">
+          {isUp ? "¡Tiempo!" : paused ? "En pausa" : idle ? "Listo" : "Tiempo restante"}
+        </span>
+        <div className="flex items-center gap-1.5">
+          {!idle && (
+            <button onClick={onAddMinute}
+              className="text-[10px] font-mono px-2 py-1 rounded-lg border border-[var(--border)] text-[var(--text-3)] active:bg-[var(--surface-2)]">
+              +1′
+            </button>
+          )}
+          {!idle && (
+            <button onClick={onReset}
+              className="text-[10px] font-mono px-2 py-1 rounded-lg border border-[var(--border)] text-[var(--text-3)] active:bg-[var(--surface-2)]">
+              Reiniciar
+            </button>
+          )}
+        </div>
+      </div>
+
+      <div className="px-4 pb-3 flex items-center gap-4">
+        <div className={`font-mono font-bold text-[2.75rem] leading-none tabular-nums ${numColor}`}>
+          {String(mins).padStart(2, "0")}:{String(secs).padStart(2, "0")}
+        </div>
+        <div className="flex-1">
+          {idle && (
+            <button onClick={onStart}
+              className="w-full py-2.5 rounded-xl bg-[var(--lime)] text-black font-bold text-sm active:scale-95 transition-transform">
+              Iniciar ronda
+            </button>
+          )}
+          {running && (
+            <button onClick={onPause}
+              className="w-full py-2.5 rounded-xl border border-[var(--border)] bg-[var(--surface-2)] font-semibold text-sm active:scale-95 transition-transform">
+              Pausar
+            </button>
+          )}
+          {paused && (
+            <button onClick={onResume}
+              className="w-full py-2.5 rounded-xl bg-[var(--lime)] text-black font-bold text-sm active:scale-95 transition-transform">
+              Reanudar
+            </button>
+          )}
+        </div>
+      </div>
+
+      <div className="h-1.5 bg-[var(--surface-2)]">
+        <div className="h-full transition-[width] duration-300 ease-linear"
+          style={{ width: pct + "%", background: barColor }} />
+      </div>
+    </div>
   );
 }
 
@@ -559,7 +737,7 @@ function Login({ onLogin, syncMode, hasError }) {
           </button>
         </form>
       </div>
-      <footer className="text-center text-[var(--text-3)] text-[11px] mt-6">Aumovio Padel · v1.6</footer>
+      <footer className="text-center text-[var(--text-3)] text-[11px] mt-6">Aumovio Padel · v1.8</footer>
     </div>
   );
 }
@@ -601,7 +779,8 @@ function Home({ data, syncMode, hasError, onContinue, onNew, onHistory, onSettin
             <div className="font-display font-bold text-2xl leading-tight">{active.name}</div>
             <div className="text-sm text-[var(--text-2)] mt-1">
               Ronda <span className="font-mono">{String(active.currentRoundIndex + 1).padStart(2, "0")}</span>
-              {" · "}{active.players.length} jugadores
+              {" · "}{active.players.filter((p) => !p.absent).length} jugadores
+              {" · "}{FORMATS[getFormat(active)].short}
             </div>
           </button>
         )}
@@ -624,7 +803,7 @@ function Home({ data, syncMode, hasError, onContinue, onNew, onHistory, onSettin
         </button>
       </div>
 
-      <footer className="text-center text-[var(--text-3)] text-[11px] mt-6">Aumovio Padel · v1.6</footer>
+      <footer className="text-center text-[var(--text-3)] text-[11px] mt-6">Aumovio Padel · v1.8</footer>
     </div>
   );
 }
@@ -636,6 +815,8 @@ function Setup({ onStart, onBack, hasActive, onArchiveActive }) {
   const [name, setName] = useState(defaultName());
   const [players, setPlayers] = useState([]);
   const [courts, setCourts] = useState(2);
+  const [format, setFormat] = useState("americano");
+  const [duration, setDuration] = useState(15);
   const [nameInput, setNameInput] = useState("");
   const inputRef = useRef();
 
@@ -643,7 +824,7 @@ function Setup({ onStart, onBack, hasActive, onArchiveActive }) {
     const n = nameInput.trim();
     if (!n) return;
     if (players.some((p) => p.name.toLowerCase() === n.toLowerCase())) { setNameInput(""); return; }
-    setPlayers([...players, { id: uid(), name: n }]);
+    setPlayers([...players, { id: uid(), name: n, absent: false }]);
     setNameInput("");
     inputRef.current?.focus();
   };
@@ -658,7 +839,7 @@ function Setup({ onStart, onBack, hasActive, onArchiveActive }) {
       if (!confirm("Hay un torneo en curso. Se archivará automáticamente. ¿Continuar?")) return;
       await onArchiveActive();
     }
-    onStart({ name: name.trim() || defaultName(), players, courts });
+    onStart({ name: name.trim() || defaultName(), players, courts, format, roundDurationMin: duration });
   };
 
   return (
@@ -669,6 +850,21 @@ function Setup({ onStart, onBack, hasActive, onArchiveActive }) {
           <SectionLabel accent>Nombre</SectionLabel>
           <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Nombre del torneo"
             className="w-full bg-[var(--surface)] border border-[var(--border)] rounded-xl px-4 py-3.5 text-[15px] placeholder:text-[var(--text-3)] focus:border-[var(--lime)] focus:outline-none"/>
+        </section>
+
+        <section>
+          <SectionLabel accent>Formato</SectionLabel>
+          <FormatPicker value={format} onChange={setFormat} />
+        </section>
+
+        <section>
+          <SectionLabel accent>Duración de ronda</SectionLabel>
+          <DurationPicker value={duration} onChange={setDuration} />
+          <p className="text-[11px] text-[var(--text-3)] mt-2 leading-relaxed px-1">
+            {duration === 0
+              ? "Sin temporizador: terminas la ronda manualmente cuando quieras."
+              : `Cada ronda dura ${duration} minutos. Aviso sonoro y vibración al acabar.`}
+          </p>
         </section>
 
         <section>
@@ -744,7 +940,7 @@ function Setup({ onStart, onBack, hasActive, onArchiveActive }) {
 // ============================================================
 // MATCH CARD (editing buffer para no romper la entrada con sync)
 // ============================================================
-function MatchCard({ match, players, onScoreChange }) {
+function MatchCard({ match, players, onScoreChange, showSeeds }) {
   const getName = (id) => players.find((p) => p.id === id)?.name || "—";
   const hasScores = match.scoreA != null && match.scoreB != null;
   const winner = !hasScores ? null
@@ -774,6 +970,11 @@ function MatchCard({ match, players, onScoreChange }) {
         <div className="flex items-center gap-2">
           <span className="font-mono text-[10px] tracking-[0.15em] uppercase text-[var(--text-3)]">Pista</span>
           <span className="font-mono text-sm font-bold">{String(match.court).padStart(2, "0")}</span>
+          {showSeeds && (
+            <span className="text-[9px] tracking-[0.1em] uppercase text-[var(--text-3)] border border-[var(--border)] rounded px-1.5 py-0.5 ml-1">
+              1+4 vs 2+3
+            </span>
+          )}
         </div>
         {hasScores && (
           <span className="text-[10px] tracking-[0.15em] uppercase font-medium text-[var(--lime)]">✓ registrado</span>
@@ -819,10 +1020,13 @@ function MatchCard({ match, players, onScoreChange }) {
 }
 
 // ============================================================
-// ROUND VIEW (con navegador de rondas para editar cualquiera)
+// ROUND VIEW
 // ============================================================
-function RoundView({ round, players, onScoreChange, roundNum, totalRounds, isCurrent, onPrev, onNext }) {
+function RoundView({ round, players, onScoreChange, roundNum, totalRounds, isCurrent, onPrev, onNext,
+                     format, durationMin, timerHandlers, onReshuffle }) {
   const getName = (id) => players.find((p) => p.id === id)?.name || "—";
+  const absent = players.filter((p) => p.absent);
+  const isMexicano = (round.format || format) === "mexicano";
   return (
     <div className="space-y-4">
       {/* Navegador de rondas */}
@@ -844,12 +1048,31 @@ function RoundView({ round, players, onScoreChange, roundNum, totalRounds, isCur
           aria-label="Ronda siguiente">→</button>
       </div>
 
+      {/* Temporizador (solo en la ronda en curso y si hay duración) */}
+      {isCurrent && durationMin > 0 && (
+        <RoundTimer round={round} durationMin={durationMin} {...timerHandlers} />
+      )}
+
+      {isCurrent && onReshuffle && (
+        <div className="flex justify-end -mb-1">
+          <button onClick={onReshuffle}
+            className="flex items-center gap-1.5 text-[11px] tracking-[0.1em] uppercase px-3 py-1.5 rounded-lg border border-[var(--border)] text-[var(--text-3)] active:bg-[var(--surface-2)] transition-colors">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M21 2v6h-6M3 12a9 9 0 0 1 15-6.7L21 8"/>
+              <path d="M3 22v-6h6M21 12a9 9 0 0 1-15 6.7L3 16"/>
+            </svg>
+            Repetir sorteo
+          </button>
+        </div>
+      )}
+
       <div className="space-y-3">
         {round.matches.map((m) => (
-          <MatchCard key={m.id} match={m} players={players}
+          <MatchCard key={m.id} match={m} players={players} showSeeds={isMexicano}
             onScoreChange={(team, val) => onScoreChange(m.id, team, val)}/>
         ))}
       </div>
+
       {round.sittingOut && round.sittingOut.length > 0 && (
         <div className="bg-[var(--surface)] border border-dashed border-[var(--border)] rounded-2xl p-4">
           <div className="text-[10px] tracking-[0.2em] uppercase text-[var(--text-3)] mb-2">Descansan esta ronda</div>
@@ -857,6 +1080,21 @@ function RoundView({ round, players, onScoreChange, roundNum, totalRounds, isCur
             {round.sittingOut.map((id) => (
               <span key={id} className="text-xs bg-[var(--surface-2)] border border-[var(--border)] rounded-lg px-2.5 py-1 text-[var(--text-2)]">
                 {getName(id)}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {isCurrent && absent.length > 0 && (
+        <div className="bg-[var(--orange)]/5 border border-dashed border-[var(--orange)]/30 rounded-2xl p-4">
+          <div className="text-[10px] tracking-[0.2em] uppercase text-[var(--orange)] mb-2">
+            Ausentes · no entran en el sorteo
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            {absent.map((p) => (
+              <span key={p.id} className="text-xs bg-[var(--surface-2)] border border-[var(--border)] rounded-lg px-2.5 py-1 text-[var(--text-3)]">
+                {p.name}
               </span>
             ))}
           </div>
@@ -879,12 +1117,19 @@ function Standings({ players, rounds, compact }) {
           <div key={s.id}
             className={`flex items-center gap-3 px-3 py-3 rounded-xl border transition-colors ${
               isLeader ? "bg-[var(--lime)]/8 border-[var(--lime)]/30" : "bg-[var(--surface)] border-[var(--border)]"
-            }`}>
+            } ${s.absent ? "opacity-55" : ""}`}>
             <div className={`font-mono text-xs w-6 text-center ${isLeader ? "text-[var(--lime)] font-bold" : "text-[var(--text-3)]"}`}>
               {String(i + 1).padStart(2, "0")}
             </div>
             <div className="flex-1 min-w-0">
-              <div className="font-medium truncate">{s.name}</div>
+              <div className="font-medium truncate flex items-center gap-2">
+                {s.name}
+                {s.absent && (
+                  <span className="text-[9px] tracking-[0.1em] uppercase text-[var(--orange)] border border-[var(--orange)]/40 rounded px-1.5 py-0.5 shrink-0">
+                    ausente
+                  </span>
+                )}
+              </div>
               {!compact && (
                 <div className="text-[11px] text-[var(--text-3)] mt-0.5 font-mono">
                   {s.played} PJ · {s.won}V {s.lost}D · {s.diff > 0 ? "+" : ""}{s.diff}
@@ -905,9 +1150,10 @@ function Standings({ players, rounds, compact }) {
 }
 
 // ============================================================
-// TOURNAMENT CONFIG — modal con pistas y jugadores
+// TOURNAMENT CONFIG — formato, temporizador, pistas y jugadores
 // ============================================================
-function TournamentConfig({ players, courts, onAdd, onRemove, onCourtsChange, onClose }) {
+function TournamentConfig({ players, courts, format, durationMin,
+                            onAdd, onRemove, onToggleAbsent, onCourtsChange, onFormatChange, onDurationChange, onClose }) {
   const [name, setName] = useState("");
   const inputRef = useRef();
   useEffect(() => { inputRef.current?.focus(); }, []);
@@ -917,28 +1163,40 @@ function TournamentConfig({ players, courts, onAdd, onRemove, onCourtsChange, on
     if (players.some((p) => p.name.toLowerCase() === t.toLowerCase())) { setName(""); return; }
     onAdd(t); setName("");
   };
-  // Confirma: si hay un nombre tecleado pendiente, lo añade antes de cerrar
   const accept = () => {
     const t = name.trim();
-    if (t && !players.some((p) => p.name.toLowerCase() === t.toLowerCase())) {
-      onAdd(t);
-    }
+    if (t && !players.some((p) => p.name.toLowerCase() === t.toLowerCase())) onAdd(t);
     onClose();
   };
-  const recommendedCourts = Math.max(1, Math.floor(players.length / 4));
-  const isIdeal = players.length >= 4 && players.length % 4 === 0 && courts === players.length / 4;
+  const activeCount = players.filter((p) => !p.absent).length;
+  const recommendedCourts = Math.max(1, Math.floor(activeCount / 4));
+  const isIdeal = activeCount >= 4 && activeCount % 4 === 0 && courts === activeCount / 4;
+
   return (
     <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 backdrop-blur-sm pop-in" onClick={onClose}>
-      <div className="w-full max-w-md bg-[var(--surface)] border-t border-[var(--border)] rounded-t-3xl flex flex-col max-h-[85vh]" onClick={(e) => e.stopPropagation()}>
+      <div className="w-full max-w-md bg-[var(--surface)] border-t border-[var(--border)] rounded-t-3xl flex flex-col max-h-[88vh]" onClick={(e) => e.stopPropagation()}>
 
-        {/* HEADER fijo */}
         <div className="px-5 pt-5 pb-3 flex items-center justify-between shrink-0">
           <h3 className="font-display font-bold text-xl">Configuración</h3>
           <button onClick={onClose} className="text-[var(--text-3)] text-xl px-2" aria-label="Cerrar">✕</button>
         </div>
 
-        {/* CONTENIDO scrollable */}
         <div className="px-5 pb-2 flex-1 overflow-y-auto">
+          {/* Formato */}
+          <SectionLabel>Formato</SectionLabel>
+          <div className="mb-5">
+            <FormatPicker value={format} onChange={onFormatChange} />
+            <p className="text-[11px] text-[var(--orange)] mt-2 px-1">
+              El cambio se aplica a partir de la próxima ronda.
+            </p>
+          </div>
+
+          {/* Temporizador */}
+          <SectionLabel>Duración de ronda</SectionLabel>
+          <div className="mb-5">
+            <DurationPicker value={durationMin} onChange={onDurationChange} />
+          </div>
+
           {/* Pistas */}
           <SectionLabel>Pistas</SectionLabel>
           <div className="bg-[var(--surface-2)] border border-[var(--border)] rounded-xl p-3 mb-2">
@@ -958,13 +1216,13 @@ function TournamentConfig({ players, courts, onAdd, onRemove, onCourtsChange, on
           <p className={`text-[11px] leading-relaxed mb-5 ${isIdeal ? "text-[var(--lime)]" : "text-[var(--text-3)]"}`}>
             {isIdeal
               ? "✓ Configuración óptima: nadie se sienta, todos juegan con todos."
-              : players.length >= 4
-                ? `Recomendado: ${recommendedCourts} pista${recommendedCourts !== 1 ? "s" : ""} con ${players.length} jugadores${players.length % 4 !== 0 ? ` (${4 - (players.length % 4)} descansa${4 - (players.length % 4) !== 1 ? "n" : ""} por ronda)` : ""}.`
-                : "Añade al menos 4 jugadores."}
+              : activeCount >= 4
+                ? `Recomendado: ${recommendedCourts} pista${recommendedCourts !== 1 ? "s" : ""} con ${activeCount} disponibles${activeCount % 4 !== 0 ? ` (${4 - (activeCount % 4)} descansa${4 - (activeCount % 4) !== 1 ? "n" : ""} por ronda)` : ""}.`
+                : "Necesitas al menos 4 jugadores disponibles."}
           </p>
 
           {/* Jugadores */}
-          <SectionLabel>Jugadores · {players.length}</SectionLabel>
+          <SectionLabel>Jugadores · {activeCount} de {players.length}</SectionLabel>
           <div className="flex gap-2 mb-3">
             <input ref={inputRef} value={name} onChange={(e) => setName(e.target.value)}
               onKeyDown={(e) => { if (e.key === "Enter") add(); }} placeholder="Nuevo jugador"
@@ -972,23 +1230,38 @@ function TournamentConfig({ players, courts, onAdd, onRemove, onCourtsChange, on
             <button onClick={add} disabled={!name.trim()}
               className="px-5 rounded-xl bg-[var(--lime)] text-black font-semibold disabled:opacity-30 active:scale-95 transition-transform">+</button>
           </div>
-          <p className="text-xs text-[var(--text-3)] mb-3 leading-relaxed">Los cambios de pistas o jugadores se aplican a partir de la próxima ronda.</p>
+          <p className="text-xs text-[var(--text-3)] mb-3 leading-relaxed">
+            Toca <strong className="text-[var(--text-2)]">Ausente</strong> si alguien se va un rato o llega tarde: no entra en el
+            sorteo pero conserva sus puntos. Los cambios se aplican en la próxima ronda.
+          </p>
           <ul className="space-y-1.5">
             {players.map((p, i) => (
-              <li key={p.id} className="flex items-center justify-between bg-[var(--surface-2)] border border-[var(--border)] rounded-xl px-3 py-2.5">
-                <div className="flex items-center gap-3">
+              <li key={p.id}
+                className={`flex items-center justify-between border rounded-xl px-3 py-2.5 transition-colors ${
+                  p.absent ? "bg-[var(--surface)] border-[var(--orange)]/25 opacity-60" : "bg-[var(--surface-2)] border-[var(--border)]"
+                }`}>
+                <div className="flex items-center gap-3 min-w-0">
                   <span className="font-mono text-[11px] text-[var(--text-3)] w-5">{String(i + 1).padStart(2, "0")}</span>
-                  <span>{p.name}</span>
+                  <span className={`truncate ${p.absent ? "line-through text-[var(--text-3)]" : ""}`}>{p.name}</span>
                 </div>
-                <button onClick={() => {
-                  if (confirm(`¿Eliminar a ${p.name}? Sus puntos se mantienen, pero ya no jugará más rondas.`)) onRemove(p.id);
-                }} className="text-[var(--text-3)] hover:text-[var(--red)] text-sm px-2" aria-label={`Eliminar ${p.name}`}>✕</button>
+                <div className="flex items-center gap-1.5 shrink-0">
+                  <button onClick={() => onToggleAbsent(p.id)}
+                    className={`text-[10px] tracking-[0.1em] uppercase px-2 py-1.5 rounded-lg border transition-colors ${
+                      p.absent
+                        ? "border-[var(--orange)]/50 text-[var(--orange)] bg-[var(--orange)]/10"
+                        : "border-[var(--border)] text-[var(--text-3)] active:bg-[var(--surface)]"
+                    }`}>
+                    {p.absent ? "Ausente" : "Juega"}
+                  </button>
+                  <button onClick={() => {
+                    if (confirm(`¿Eliminar a ${p.name} del torneo? Sus puntos se mantienen en la clasificación.`)) onRemove(p.id);
+                  }} className="text-[var(--text-3)] hover:text-[var(--red)] text-sm px-2" aria-label={`Eliminar ${p.name}`}>✕</button>
+                </div>
               </li>
             ))}
           </ul>
         </div>
 
-        {/* FOOTER sticky con botón Aceptar */}
         <div className="px-5 pt-3 safe-bottom border-t border-[var(--border)] shrink-0 bg-[var(--surface)]">
           <button onClick={accept}
             className="w-full py-3.5 rounded-xl bg-[var(--lime)] text-black font-display font-bold text-lg active:scale-[0.98] transition-transform tracking-tight">
@@ -1002,8 +1275,7 @@ function TournamentConfig({ players, courts, onAdd, onRemove, onCourtsChange, on
 }
 
 // ============================================================
-// ADMIN GATE — modal de confirmación con credenciales
-// para acciones destructivas (borrar historial, reset total)
+// ADMIN GATE
 // ============================================================
 function AdminGate({ title, message, onConfirm, onCancel }) {
   const [user, setUser] = useState("");
@@ -1016,11 +1288,8 @@ function AdminGate({ title, message, onConfirm, onCancel }) {
   const submit = (e) => {
     if (e) e.preventDefault();
     if (user.trim().toLowerCase() === "admin" && pass === "padelrifa") {
-      setError(false);
-      onConfirm();
-    } else {
-      setError(true);
-    }
+      setError(false); onConfirm();
+    } else { setError(true); }
   };
 
   return (
@@ -1034,28 +1303,22 @@ function AdminGate({ title, message, onConfirm, onCancel }) {
         {message && <p className="text-xs text-[var(--text-2)] mt-2 leading-relaxed">{message}</p>}
 
         <form onSubmit={submit} className="space-y-2.5 mt-5">
-          <input
-            ref={userRef} value={user}
+          <input ref={userRef} value={user}
             onChange={(e) => { setUser(e.target.value); setError(false); }}
             placeholder="Usuario admin" autoComplete="off" autoCapitalize="none" autoCorrect="off"
-            className="w-full bg-[var(--surface-2)] border border-[var(--border)] rounded-xl px-4 py-3 text-[15px] placeholder:text-[var(--text-3)] focus:border-[var(--red)] focus:outline-none"
-          />
+            className="w-full bg-[var(--surface-2)] border border-[var(--border)] rounded-xl px-4 py-3 text-[15px] placeholder:text-[var(--text-3)] focus:border-[var(--red)] focus:outline-none"/>
           <div className="relative">
-            <input
-              type={show ? "text" : "password"} value={pass}
+            <input type={show ? "text" : "password"} value={pass}
               onChange={(e) => { setPass(e.target.value); setError(false); }}
               placeholder="Contraseña" autoComplete="off"
-              className="w-full bg-[var(--surface-2)] border border-[var(--border)] rounded-xl px-4 py-3 pr-16 text-[15px] placeholder:text-[var(--text-3)] focus:border-[var(--red)] focus:outline-none"
-            />
+              className="w-full bg-[var(--surface-2)] border border-[var(--border)] rounded-xl px-4 py-3 pr-16 text-[15px] placeholder:text-[var(--text-3)] focus:border-[var(--red)] focus:outline-none"/>
             <button type="button" onClick={() => setShow(!show)}
               className="absolute right-2 top-1/2 -translate-y-1/2 text-xs px-2 py-1 text-[var(--text-3)]">
               {show ? "ocultar" : "ver"}
             </button>
           </div>
           {error && (
-            <div className="text-xs text-[var(--red)] px-1 pop-in">
-              Credenciales de administrador incorrectas.
-            </div>
+            <div className="text-xs text-[var(--red)] px-1 pop-in">Credenciales de administrador incorrectas.</div>
           )}
           <div className="grid grid-cols-2 gap-2 pt-2">
             <button type="button" onClick={onCancel}
@@ -1074,36 +1337,106 @@ function AdminGate({ title, message, onConfirm, onCancel }) {
 }
 
 // ============================================================
+// END ROUND SHEET — solo aparece si faltan resultados.
+// Distingue entre "se jugó pero no se apuntó" y "no se jugó".
+// ============================================================
+function EndRoundSheet({ roundNum, total, filled, isMexicano, onSave, onDiscard, onCancel }) {
+  const missing = total - filled;
+  return (
+    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/70 backdrop-blur-sm pop-in" onClick={onCancel}>
+      <div className="w-full max-w-md bg-[var(--surface)] border-t border-[var(--border)] rounded-t-3xl p-5 safe-bottom max-h-[88vh] overflow-y-auto"
+        onClick={(e) => e.stopPropagation()}>
+
+        <div className="flex items-start justify-between mb-1">
+          <div className="text-[10px] tracking-[0.25em] uppercase text-[var(--orange)] font-medium">
+            Faltan resultados
+          </div>
+          <button onClick={onCancel} className="text-[var(--text-3)] text-xl px-2 -mt-1" aria-label="Cancelar">✕</button>
+        </div>
+
+        <h3 className="font-display font-bold text-xl leading-tight">
+          Ronda <span className="font-mono text-[var(--lime)]">{String(roundNum).padStart(2, "0")}</span>
+          <span className="text-[var(--text-3)]"> · </span>
+          <span className="font-mono">{missing}</span> de <span className="font-mono">{total}</span> sin marcador
+        </h3>
+        <p className="text-xs text-[var(--text-2)] mt-2 leading-relaxed">
+          Los partidos sin marcador no suman puntos en la clasificación. ¿Qué quieres hacer con esta ronda?
+        </p>
+
+        <div className="space-y-2.5 mt-5">
+          {/* GUARDAR */}
+          <button onClick={onSave}
+            className="w-full text-left rounded-2xl bg-[var(--lime)] text-black p-4 active:scale-[0.98] transition-transform">
+            <div className="font-display font-bold text-lg leading-tight">Guardar la ronda</div>
+            <div className="text-[11px] mt-1 leading-relaxed opacity-80">
+              Se jugó, pero sin apuntar. Las parejas y los descansos quedan registrados para la rotación de las
+              próximas rondas.
+            </div>
+          </button>
+
+          {/* DESCARTAR */}
+          <button onClick={() => {
+            if (filled > 0 && !confirm(`Se perderá${filled !== 1 ? "n" : ""} ${filled} resultado${filled !== 1 ? "s" : ""} ya apuntado${filled !== 1 ? "s" : ""}. ¿Descartar la ronda igualmente?`)) return;
+            onDiscard();
+          }}
+            className="w-full text-left rounded-2xl border border-[var(--orange)]/35 bg-[var(--orange)]/5 p-4 active:bg-[var(--orange)]/10 transition-colors">
+            <div className="font-display font-bold text-lg leading-tight text-[var(--orange)]">Descartar la ronda</div>
+            <div className="text-[11px] text-[var(--text-2)] mt-1 leading-relaxed">
+              No se jugó. Se sortea de nuevo sin gastar parejas ni descansos, y el contador de rondas no avanza.
+              {filled > 0 && (
+                <span className="text-[var(--orange)]"> Se perderá{filled !== 1 ? "n" : ""} {filled} resultado{filled !== 1 ? "s" : ""} ya apuntado{filled !== 1 ? "s" : ""}.</span>
+              )}
+            </div>
+            {isMexicano && (
+              <div className="text-[10px] text-[var(--text-3)] mt-2 leading-relaxed border-t border-[var(--border)] pt-2">
+                En Mexicano las parejas salen de la clasificación: al descartar volverán a salir las mismas.
+              </div>
+            )}
+          </button>
+
+          {/* CANCELAR */}
+          <button onClick={onCancel}
+            className="w-full py-3.5 rounded-xl border border-[var(--border)] bg-[var(--surface-2)] font-medium active:scale-95 transition-transform">
+            Cancelar y apuntar resultados
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
 // TOURNAMENT
 // ============================================================
 function Tournament({ active, setActive, onFinish, onBack, syncMode, hasError }) {
   const { players, courts, rounds, currentRoundIndex } = active;
+  const format = getFormat(active);
+  const durationMin = getDuration(active);
   const [tab, setTab] = useState("round");
-  const [showPlayers, setShowPlayers] = useState(false);
+  const [showConfig, setShowConfig] = useState(false);
+  const [showEndSheet, setShowEndSheet] = useState(false);
   const [viewRound, setViewRound] = useState(currentRoundIndex);
 
-  // Cuando avanza la ronda actual (tras Terminar ronda), seguir a esa ronda.
   useEffect(() => { setViewRound(currentRoundIndex); }, [currentRoundIndex]);
 
-  // Safety net: si por algún motivo la ronda actual no existe (datos viejos sincronizados,
-  // estado corrupto), genérala. En el flujo normal esto NO se dispara porque endRound y
-  // startNew ya generan la ronda atómicamente.
+  const availableCount = players.filter((p) => !p.absent).length;
+
+  // Safety net: si la ronda actual no existe (estado antiguo o corrupto), genérala.
   useEffect(() => {
-    if (rounds[currentRoundIndex]) return;            // ronda ya existe → no hacer nada
+    if (rounds[currentRoundIndex]) return;
     const completed = rounds.slice(0, currentRoundIndex);
-    const next = generateRound(players, courts, completed);
+    const next = generateRound(players, courts, completed, format);
     if (!next) return;
+    if (durationMin > 0) next.timerStartedAt = Date.now();
     setActive((prev) => {
       if (!prev || prev.rounds[prev.currentRoundIndex]) return prev;
       return { ...prev, rounds: [...prev.rounds.slice(0, prev.currentRoundIndex), next] };
     });
-  }, [currentRoundIndex, players.length]);
+  }, [currentRoundIndex, availableCount]);
 
   const isCurrent = viewRound === currentRoundIndex;
   const round = rounds[viewRound];
 
-  // Edita la ronda que se está viendo (puede ser una anterior). Las puntuaciones
-  // de rondas pasadas son editables; al cambiarlas se recalcula la clasificación.
   const updateScore = (matchId, team, val) => {
     setActive((prev) => ({
       ...prev,
@@ -1119,37 +1452,110 @@ function Tournament({ active, setActive, onFinish, onBack, syncMode, hasError })
     }));
   };
 
-  // ATÓMICO: marcar ronda actual como completada + incrementar índice + generar la
-  // siguiente ronda en una sola transición de estado. Esto evita el race condition
-  // que antes generaba blips (dos setActive en cascada → dos POSTs → respuestas
-  // que se solapaban y la UI rebotaba).
+  // --- Temporizador: solo se sincroniza el instante de arranque ---
+  const patchRound = (patch) => {
+    setActive((prev) => ({
+      ...prev,
+      rounds: prev.rounds.map((r, idx) => (idx === viewRound ? { ...r, ...patch } : r)),
+    }));
+  };
+  const timerHandlers = {
+    onStart:  () => patchRound({ timerStartedAt: Date.now(), timerPausedElapsed: null }),
+    onPause:  () => patchRound({ timerStartedAt: null, timerPausedElapsed: Date.now() - (round?.timerStartedAt || Date.now()) }),
+    onResume: () => patchRound({ timerStartedAt: Date.now() - (round?.timerPausedElapsed || 0), timerPausedElapsed: null }),
+    onReset:  () => patchRound({ timerStartedAt: null, timerPausedElapsed: null }),
+    onAddMinute: () => {
+      if (!round) return;
+      if (round.timerPausedElapsed != null) {
+        patchRound({ timerPausedElapsed: Math.max(0, round.timerPausedElapsed - 60000) });
+      } else if (round.timerStartedAt != null) {
+        patchRound({ timerStartedAt: round.timerStartedAt + 60000 });
+      }
+    },
+  };
+
+  // ATÓMICO: completar ronda + avanzar índice + generar la siguiente en una sola
+  // transición de estado. Evita el race condition que producía blips.
+  // Esta es la opción "Guardar la ronda": las parejas y descansos SÍ cuentan
+  // para la rotación aunque no se hayan apuntado marcadores.
   const endRound = () => {
     setActive((prev) => {
+      const fmt = getFormat(prev);
+      const dur = getDuration(prev);
       const completedRounds = prev.rounds.map((r, idx) =>
         idx === prev.currentRoundIndex ? { ...r, completed: true } : r
       );
       const newIndex = prev.currentRoundIndex + 1;
-      const nextRound = generateRound(
-        prev.players,
-        prev.courts,
-        completedRounds.slice(0, newIndex)
-      );
+      const nextRound = generateRound(prev.players, prev.courts, completedRounds.slice(0, newIndex), fmt);
+      if (nextRound && dur > 0) nextRound.timerStartedAt = Date.now();
       const newRounds = nextRound ? [...completedRounds, nextRound] : completedRounds;
       return { ...prev, rounds: newRounds, currentRoundIndex: newIndex };
     });
+    setShowEndSheet(false);
     setTab("round");
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
+  // Sustituye la ronda actual por un sorteo nuevo SIN avanzar el contador.
+  // La ronda descartada no deja rastro: no quema parejas ni cuenta descansos.
+  // Comparten esta función "Descartar la ronda" y "Repetir sorteo".
+  const regenerateCurrentRound = () => {
+    setActive((prev) => {
+      const fmt = getFormat(prev);
+      const dur = getDuration(prev);
+      const idx = prev.currentRoundIndex;
+      const previousRounds = prev.rounds.slice(0, idx);   // se descarta la actual y lo que venga después
+      const fresh = generateRound(prev.players, prev.courts, previousRounds, fmt);
+      if (fresh && dur > 0) fresh.timerStartedAt = Date.now();
+      const newRounds = fresh ? [...previousRounds, fresh] : previousRounds;
+      return { ...prev, rounds: newRounds, currentRoundIndex: idx };
+    });
+    setShowEndSheet(false);
+    setTab("round");
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
+  // "Repetir sorteo" desde la ronda en curso: avisa si ya hay resultados apuntados.
+  const reshuffleRound = () => {
+    const filled = round ? round.matches.filter((m) => m.scoreA != null && m.scoreB != null).length : 0;
+    const msg = filled > 0
+      ? `Se sortearán parejas nuevas para esta ronda. Se perderá${filled !== 1 ? "n" : ""} ${filled} resultado${filled !== 1 ? "s" : ""} ya apuntado${filled !== 1 ? "s" : ""}. ¿Continuar?`
+      : "¿Sortear de nuevo las parejas de esta ronda?";
+    if (!confirm(msg)) return;
+    regenerateCurrentRound();
+  };
+
+  // Al pulsar "Terminar ronda": si está todo apuntado, avanza directo.
+  // Si faltan marcadores, abre la hoja para que decidas qué hacer con la ronda.
+  const handleEndRound = () => {
+    if (!round) return;
+    const filled = round.matches.filter((m) => m.scoreA != null && m.scoreB != null).length;
+    if (filled === round.matches.length) { endRound(); return; }
+    setShowEndSheet(true);
+  };
+
   const addPlayer = (name) => {
-    setActive((prev) => ({ ...prev, players: [...prev.players, { id: uid(), name }] }));
+    setActive((prev) => ({ ...prev, players: [...prev.players, { id: uid(), name, absent: false }] }));
   };
   const removePlayer = (id) => {
     setActive((prev) => ({ ...prev, players: prev.players.filter((p) => p.id !== id) }));
   };
-  const setCourts = (newCourts) => {
-    setActive((prev) => ({ ...prev, courts: Math.max(1, newCourts) }));
+  const toggleAbsent = (id) => {
+    setActive((prev) => ({
+      ...prev,
+      players: prev.players.map((p) => (p.id === id ? { ...p, absent: !p.absent } : p)),
+    }));
   };
+  const setCourts = (n) => setActive((prev) => ({ ...prev, courts: Math.max(1, n) }));
+  const setFormat = (f) => setActive((prev) => ({ ...prev, format: f }));
+  const setDuration = (m) => setActive((prev) => ({ ...prev, roundDurationMin: m }));
+
+  const configModal = showConfig && (
+    <TournamentConfig players={players} courts={courts} format={format} durationMin={durationMin}
+      onAdd={addPlayer} onRemove={removePlayer} onToggleAbsent={toggleAbsent}
+      onCourtsChange={setCourts} onFormatChange={setFormat} onDurationChange={setDuration}
+      onClose={() => setShowConfig(false)}/>
+  );
 
   const matchesWithScores = round ? round.matches.filter((m) => m.scoreA != null && m.scoreB != null).length : 0;
 
@@ -1159,16 +1565,15 @@ function Tournament({ active, setActive, onFinish, onBack, syncMode, hasError })
         <BackHeader onBack={onBack} title={active.name} right={<SyncBadge mode={syncMode} hasError={hasError}/>}/>
         <div className="flex-1 flex items-center justify-center p-8 text-center">
           <div>
-            <p className="text-[var(--text-2)] mb-4">No hay suficientes jugadores para generar una ronda.</p>
-            <button onClick={() => setShowPlayers(true)}
-              className="px-5 py-3 rounded-xl bg-[var(--lime)] text-black font-medium">Añadir jugadores</button>
-            {showPlayers && (
-              <TournamentConfig players={players} courts={courts}
-                onAdd={addPlayer} onRemove={removePlayer} onCourtsChange={setCourts}
-                onClose={() => setShowPlayers(false)}/>
-            )}
+            <p className="text-[var(--text-2)] mb-1">No hay suficientes jugadores disponibles.</p>
+            <p className="text-xs text-[var(--text-3)] mb-4">
+              Hacen falta 4 sin marcar como ausentes ({availableCount} ahora mismo).
+            </p>
+            <button onClick={() => setShowConfig(true)}
+              className="px-5 py-3 rounded-xl bg-[var(--lime)] text-black font-medium">Abrir configuración</button>
           </div>
         </div>
+        {configModal}
       </div>
     );
   }
@@ -1179,12 +1584,29 @@ function Tournament({ active, setActive, onFinish, onBack, syncMode, hasError })
         right={
           <div className="flex items-center gap-2">
             <SyncBadge mode={syncMode} hasError={hasError}/>
-            <button onClick={() => setShowPlayers(true)}
+            <button onClick={() => setShowConfig(true)}
               className="text-xs px-3 py-1.5 rounded-lg border border-[var(--border)] text-[var(--text-2)] active:bg-[var(--surface)] font-mono">
-              {players.length}j · {courts}p
+              {availableCount}j · {courts}p
             </button>
           </div>
         }/>
+
+      <div className="px-5 flex items-center gap-2 pb-2">
+        <span className="text-[10px] tracking-[0.15em] uppercase text-[var(--lime)] border border-[var(--lime)]/30 bg-[var(--lime)]/5 rounded-lg px-2 py-1">
+          {FORMATS[format].short}
+        </span>
+        {durationMin > 0 && (
+          <span className="text-[10px] tracking-[0.15em] uppercase text-[var(--text-3)] border border-[var(--border)] rounded-lg px-2 py-1 font-mono">
+            {durationMin}′ / ronda
+          </span>
+        )}
+        {players.some((p) => p.absent) && (
+          <span className="text-[10px] tracking-[0.15em] uppercase text-[var(--orange)] border border-[var(--orange)]/30 rounded-lg px-2 py-1">
+            {players.filter((p) => p.absent).length} ausente{players.filter((p) => p.absent).length !== 1 ? "s" : ""}
+          </span>
+        )}
+      </div>
+
       <div className="px-5">
         <div className="flex gap-1 bg-[var(--surface)] border border-[var(--border)] rounded-xl p-1">
           <button onClick={() => setTab("round")}
@@ -1202,6 +1624,8 @@ function Tournament({ active, setActive, onFinish, onBack, syncMode, hasError })
         {tab === "round" ? (
           <RoundView round={round} players={players} onScoreChange={updateScore}
             roundNum={viewRound + 1} totalRounds={currentRoundIndex + 1} isCurrent={isCurrent}
+            format={format} durationMin={durationMin} timerHandlers={timerHandlers}
+            onReshuffle={reshuffleRound}
             onPrev={() => { setViewRound((v) => Math.max(0, v - 1)); window.scrollTo({ top: 0, behavior: "smooth" }); }}
             onNext={() => { setViewRound((v) => Math.min(currentRoundIndex, v + 1)); window.scrollTo({ top: 0, behavior: "smooth" }); }}
           />
@@ -1214,6 +1638,11 @@ function Tournament({ active, setActive, onFinish, onBack, syncMode, hasError })
                 <div className="font-mono text-xl font-bold">{String(currentRoundIndex + 1).padStart(2, "0")}</div>
               </div>
             </div>
+            {format === "mexicano" && (
+              <div className="rounded-xl border border-[var(--lime)]/25 bg-[var(--lime)]/5 px-4 py-3 text-[11px] text-[var(--lime)] leading-relaxed">
+                Formato Mexicano: esta tabla define las parejas de la próxima ronda (1º+4º vs 2º+3º en cada pista).
+              </div>
+            )}
             <Standings players={players} rounds={rounds} />
           </div>
         )}
@@ -1228,7 +1657,7 @@ function Tournament({ active, setActive, onFinish, onBack, syncMode, hasError })
                 <button onClick={() => { if (confirm("¿Finalizar el torneo y ver al campeón?")) onFinish(); }}
                   className="underline underline-offset-2 hover:text-[var(--text-2)]">Finalizar torneo</button>
               </div>
-              <button onClick={endRound}
+              <button onClick={handleEndRound}
                 className="w-full py-4 rounded-xl bg-[var(--lime)] text-black font-display font-bold text-lg active:scale-[0.98] transition-transform tracking-tight">
                 Terminar ronda →
               </button>
@@ -1252,10 +1681,18 @@ function Tournament({ active, setActive, onFinish, onBack, syncMode, hasError })
         </div>
       </div>
 
-      {showPlayers && (
-        <TournamentConfig players={players} courts={courts}
-          onAdd={addPlayer} onRemove={removePlayer} onCourtsChange={setCourts}
-          onClose={() => setShowPlayers(false)}/>
+      {configModal}
+
+      {showEndSheet && round && (
+        <EndRoundSheet
+          roundNum={currentRoundIndex + 1}
+          total={round.matches.length}
+          filled={round.matches.filter((m) => m.scoreA != null && m.scoreB != null).length}
+          isMexicano={format === "mexicano"}
+          onSave={endRound}
+          onDiscard={regenerateCurrentRound}
+          onCancel={() => setShowEndSheet(false)}
+        />
       )}
     </div>
   );
@@ -1323,6 +1760,9 @@ function HistoryList({ history, onSelect, onBack, syncMode, hasError }) {
                     <div className="text-xs text-[var(--text-3)] mt-1 font-mono">
                       {formatDate(t.startedAt)} · {t.players.length} jug. · {t.rounds.length} rondas
                     </div>
+                    <div className="text-[10px] tracking-[0.15em] uppercase text-[var(--text-3)] mt-1">
+                      {FORMATS[getFormat(t)].short}
+                    </div>
                   </div>
                   {t.winner && (
                     <div className="text-right shrink-0">
@@ -1360,10 +1800,8 @@ function HistoryDetail({ tournament, onBack, onDelete, onUpdate }) {
     );
   }
   const getName = (id) => tournament.players.find((p) => p.id === id)?.name || "—";
-
   const enterEdit = () => { setNameDraft(tournament.name); setEditMode(true); setTab("rounds"); };
 
-  // Edita el marcador de un partido dentro de una ronda del torneo archivado.
   const updateScore = (roundId, matchId, team, val) => {
     onUpdate(tournament.id, (t) => ({
       ...t,
@@ -1411,7 +1849,7 @@ function HistoryDetail({ tournament, onBack, onDelete, onUpdate }) {
           </div>
         )}
 
-        <div className="bg-[var(--surface)] border border-[var(--border)] rounded-2xl p-4 mb-4 grid grid-cols-3 gap-3 text-center">
+        <div className="bg-[var(--surface)] border border-[var(--border)] rounded-2xl p-4 mb-2 grid grid-cols-3 gap-3 text-center">
           <div>
             <div className="text-[10px] tracking-[0.15em] uppercase text-[var(--text-3)]">Fecha</div>
             <div className="font-mono text-sm mt-1">{formatDate(tournament.startedAt)}</div>
@@ -1425,6 +1863,12 @@ function HistoryDetail({ tournament, onBack, onDelete, onUpdate }) {
             <div className="font-mono text-sm mt-1">{tournament.rounds.length}</div>
           </div>
         </div>
+        <div className="text-center mb-4">
+          <span className="text-[10px] tracking-[0.15em] uppercase text-[var(--text-3)] border border-[var(--border)] rounded-lg px-2 py-1">
+            Formato {FORMATS[getFormat(tournament)].short}
+          </span>
+        </div>
+
         {!editMode && tournament.winner && tournament.winner.points > 0 && (
           <div className="text-center my-4">
             <div className="text-[10px] tracking-[0.3em] uppercase text-[var(--text-3)] mb-2">Campeón</div>
@@ -1571,7 +2015,7 @@ function Settings({ onBack, onLogout, onReset, syncMode, lastError }) {
           </div>
         </button>
       </div>
-      <footer className="text-center text-[var(--text-3)] text-[11px] pb-6">Aumovio Padel · v1.6</footer>
+      <footer className="text-center text-[var(--text-3)] text-[11px] pb-6">Aumovio Padel · v1.8</footer>
 
       {askingAdmin && (
         <AdminGate
@@ -1617,8 +2061,8 @@ function App() {
   const setActive = (updater) => dataStore.setActive(updater);
 
   const startNew = (config) => {
-    // Genera la primera ronda inline para evitar un re-render extra del useEffect.
-    const firstRound = generateRound(config.players, config.courts, []);
+    const firstRound = generateRound(config.players, config.courts, [], config.format);
+    if (firstRound && config.roundDurationMin > 0) firstRound.timerStartedAt = Date.now();
     dataStore.setActive({
       id: uid(),
       name: config.name,
@@ -1626,6 +2070,8 @@ function App() {
       phase: "tournament",
       players: config.players,
       courts: config.courts,
+      format: config.format,
+      roundDurationMin: config.roundDurationMin,
       rounds: firstRound ? [firstRound] : [],
       currentRoundIndex: 0,
     });
