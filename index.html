@@ -139,7 +139,7 @@ function calcRoundsHistory(rounds) {
 function calcStandings(players, rounds) {
   const stats = {};
   players.forEach((p) => {
-    stats[p.id] = { id: p.id, name: p.name, absent: !!p.absent, points: 0, played: 0, won: 0, lost: 0, diff: 0 };
+    stats[p.id] = { id: p.id, name: p.name, absent: !!p.absent, retired: !!p.retired, points: 0, played: 0, won: 0, lost: 0, diff: 0 };
   });
   rounds.forEach((r) => {
     r.matches.forEach((m) => {
@@ -182,16 +182,19 @@ function generateRound(players, courts, completedRounds, format) {
   if (numPlay < 4) return null;
 
   // --- QUIÉN JUEGA (común a los dos formatos) ---
-  // Regla: nadie descansa dos veces seguidas. Quien descansó la última ronda
-  // tiene prioridad absoluta para jugar esta. Entre el resto, juega antes quien
-  // más veces ha descansado en total.
+  // Reparto JUSTO de descansos: nadie descansa por 2ª vez hasta que TODOS hayan
+  // descansado 1ª; nadie por 3ª hasta que todos lleven 2, etc. Se ordena por total
+  // de descansos DESCENDENTE (quien más ha descansado juega antes), así los que
+  // menos han descansado quedan al final y son los que se sientan. Como desempate
+  // entre iguales, no repite quien descansó la última ronda (evita 2 seguidas).
   const lastRound = completedRounds.length ? completedRounds[completedRounds.length - 1] : null;
   const satOutLast = new Set(lastRound ? (lastRound.sittingOut || []) : []);
   const sorted = shuffle([...available]).sort((a, b) => {
+    const sa = history.sitOuts[a.id] || 0, sb = history.sitOuts[b.id] || 0;
+    if (sa !== sb) return sb - sa;                        // (1) más descansos → juega antes
     const aLast = satOutLast.has(a.id) ? 1 : 0;
     const bLast = satOutLast.has(b.id) ? 1 : 0;
-    if (aLast !== bLast) return bLast - aLast;
-    return (history.sitOuts[b.id] || 0) - (history.sitOuts[a.id] || 0);
+    return bLast - aLast;                                  // (2) descansó ayer → juega antes
   });
   const playingPlayers = sorted.slice(0, numPlay);
   const sittingOut = sorted.slice(numPlay).map((p) => p.id);
@@ -219,20 +222,25 @@ function generateRound(players, courts, completedRounds, format) {
     return { ...base, matches };
   }
 
-  // --- AMERICANO: minimizar repeticiones de pareja y rival ---
+  // --- AMERICANO: prioridad ESTRICTA (lexicográfica) ---
+  // (1) descansos justos ya está resuelto arriba (selección de quién juega).
+  // (2) NO repetir pareja  >>  (3) NO repetir rival.
+  // El peso de repetir pareja (1e6) domina de forma absoluta sobre repetir rival,
+  // así que el algoritmo agota TODAS las parejas nuevas posibles antes de permitir
+  // una repetición. Más intentos (4000) para encontrar el óptimo en grupos grandes.
   const playing = playingPlayers.map((p) => p.id);
   let best = null;
   let bestScore = Infinity;
-  for (let t = 0; t < 1200; t++) {
+  for (let t = 0; t < 4000; t++) {
     const sh = shuffle(playing);
     let score = 0;
     const matches = [];
     for (let i = 0; i < sh.length; i += 4) {
       const teamA = [sh[i], sh[i + 1]];
       const teamB = [sh[i + 2], sh[i + 3]];
-      score += (history.partners[teamA[0]]?.[teamA[1]] || 0) * 1000;
-      score += (history.partners[teamB[0]]?.[teamB[1]] || 0) * 1000;
-      for (const a of teamA) for (const b of teamB) score += history.opponents[a]?.[b] || 0;
+      score += (history.partners[teamA[0]]?.[teamA[1]] || 0) * 1e6;   // (2) pareja repetida: penalización enorme
+      score += (history.partners[teamB[0]]?.[teamB[1]] || 0) * 1e6;
+      for (const a of teamA) for (const b of teamB) score += history.opponents[a]?.[b] || 0;  // (3) rival repetido
       matches.push({ id: uid(), court: i / 4 + 1, teamA, teamB, scoreA: null, scoreB: null });
     }
     if (score < bestScore) { bestScore = score; best = matches; if (bestScore === 0) break; }
@@ -848,7 +856,7 @@ function Login({ onLogin, syncMode, hasError }) {
           </button>
         </form>
       </div>
-      <footer className="text-center text-[var(--text-3)] text-[11px] mt-6">Aumovio Padel · v1.9</footer>
+      <footer className="text-center text-[var(--text-3)] text-[11px] mt-6">Aumovio Padel · v2.0</footer>
     </div>
   );
 }
@@ -930,7 +938,7 @@ function Home({ data, syncMode, hasError, onContinue, onNew, onHistory, onSessio
         </button>
       </div>
 
-      <footer className="text-center text-[var(--text-3)] text-[11px] mt-6">Aumovio Padel · v1.9</footer>
+      <footer className="text-center text-[var(--text-3)] text-[11px] mt-6">Aumovio Padel · v2.0</footer>
     </div>
   );
 }
@@ -1152,7 +1160,8 @@ function MatchCard({ match, players, onScoreChange, showSeeds }) {
 function RoundView({ round, players, onScoreChange, roundNum, totalRounds, isCurrent, onPrev, onNext,
                      format, durationMin, timerHandlers, onReshuffle }) {
   const getName = (id) => players.find((p) => p.id === id)?.name || "—";
-  const absent = players.filter((p) => p.absent);
+  const absent = players.filter((p) => p.absent && !p.retired);   // ausentes temporales
+  const retired = players.filter((p) => p.retired);                // retirados (no vuelven)
   const isMexicano = (round.format || format) === "mexicano";
   return (
     <div className="space-y-4">
@@ -1227,6 +1236,21 @@ function RoundView({ round, players, onScoreChange, roundNum, totalRounds, isCur
           </div>
         </div>
       )}
+
+      {isCurrent && retired.length > 0 && (
+        <div className="bg-[var(--red)]/5 border border-dashed border-[var(--red)]/30 rounded-2xl p-4">
+          <div className="text-[10px] tracking-[0.2em] uppercase text-[var(--red)] mb-2">
+            Retirados · mantienen sus puntos en la clasificación
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            {retired.map((p) => (
+              <span key={p.id} className="text-xs bg-[var(--surface-2)] border border-[var(--border)] rounded-lg px-2.5 py-1 text-[var(--text-3)] line-through">
+                {p.name}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1251,11 +1275,15 @@ function Standings({ players, rounds, compact }) {
             <div className="flex-1 min-w-0">
               <div className="font-medium truncate flex items-center gap-2">
                 {s.name}
-                {s.absent && (
+                {s.retired ? (
+                  <span className="text-[9px] tracking-[0.1em] uppercase text-[var(--red)] border border-[var(--red)]/40 rounded px-1.5 py-0.5 shrink-0">
+                    retirado
+                  </span>
+                ) : s.absent ? (
                   <span className="text-[9px] tracking-[0.1em] uppercase text-[var(--orange)] border border-[var(--orange)]/40 rounded px-1.5 py-0.5 shrink-0">
                     ausente
                   </span>
-                )}
+                ) : null}
               </div>
               {!compact && (
                 <div className="text-[11px] text-[var(--text-3)] mt-0.5 font-mono">
@@ -1372,17 +1400,26 @@ function TournamentConfig({ players, courts, format, durationMin,
                   <span className={`truncate ${p.absent ? "line-through text-[var(--text-3)]" : ""}`}>{p.name}</span>
                 </div>
                 <div className="flex items-center gap-1.5 shrink-0">
-                  <button onClick={() => onToggleAbsent(p.id)}
-                    className={`text-[10px] tracking-[0.1em] uppercase px-2 py-1.5 rounded-lg border transition-colors ${
-                      p.absent
-                        ? "border-[var(--orange)]/50 text-[var(--orange)] bg-[var(--orange)]/10"
-                        : "border-[var(--border)] text-[var(--text-3)] active:bg-[var(--surface)]"
-                    }`}>
-                    {p.absent ? "Ausente" : "Juega"}
-                  </button>
-                  <button onClick={() => {
-                    if (confirm(`¿Eliminar a ${p.name} del torneo? Sus puntos se mantienen en la clasificación.`)) onRemove(p.id);
-                  }} className="text-[var(--text-3)] hover:text-[var(--red)] text-sm px-2" aria-label={`Eliminar ${p.name}`}>✕</button>
+                  {p.retired ? (
+                    // Un jugador retirado no vuelve al sorteo; su marca queda en la tabla.
+                    <span className="text-[10px] tracking-[0.1em] uppercase px-2 py-1.5 rounded-lg border border-[var(--red)]/40 text-[var(--red)] bg-[var(--red)]/10">
+                      Retirado
+                    </span>
+                  ) : (
+                    <>
+                      <button onClick={() => onToggleAbsent(p.id)}
+                        className={`text-[10px] tracking-[0.1em] uppercase px-2 py-1.5 rounded-lg border transition-colors ${
+                          p.absent
+                            ? "border-[var(--orange)]/50 text-[var(--orange)] bg-[var(--orange)]/10"
+                            : "border-[var(--border)] text-[var(--text-3)] active:bg-[var(--surface)]"
+                        }`}>
+                        {p.absent ? "Ausente" : "Juega"}
+                      </button>
+                      <button onClick={() => {
+                        if (confirm(`¿Retirar a ${p.name}? Sale de las próximas rondas pero sus puntos se mantienen en la clasificación hasta el final.`)) onRemove(p.id);
+                      }} className="text-[10px] tracking-[0.1em] uppercase px-2 py-1.5 rounded-lg border border-[var(--border)] text-[var(--text-3)] hover:text-[var(--red)] active:bg-[var(--surface)]" aria-label={`Retirar ${p.name}`}>Retirar</button>
+                    </>
+                  )}
                 </div>
               </li>
             ))}
@@ -1664,8 +1701,14 @@ function Tournament({ active, setActive, onFinish, onBack, syncMode, hasError })
   const addPlayer = (name) => {
     setActive((prev) => ({ ...prev, players: [...prev.players, { id: uid(), name, absent: false }] }));
   };
+  // "Retirar" un jugador: sale del sorteo pero CONSERVA sus puntos en la clasificación
+  // (hasta el final del torneo). Reutiliza el flag `absent` para excluirlo del draw;
+  // se distingue del ausente temporal con el flag `retired`, solo para etiquetarlo.
   const removePlayer = (id) => {
-    setActive((prev) => ({ ...prev, players: prev.players.filter((p) => p.id !== id) }));
+    setActive((prev) => ({
+      ...prev,
+      players: prev.players.map((p) => (p.id === id ? { ...p, absent: true, retired: true } : p)),
+    }));
   };
   const toggleAbsent = (id) => {
     setActive((prev) => ({
@@ -2142,7 +2185,7 @@ function Settings({ onBack, onLogout, onReset, syncMode, lastError }) {
           </div>
         </button>
       </div>
-      <footer className="text-center text-[var(--text-3)] text-[11px] pb-6">Aumovio Padel · v1.9</footer>
+      <footer className="text-center text-[var(--text-3)] text-[11px] pb-6">Aumovio Padel · v2.0</footer>
 
       {askingAdmin && (
         <AdminGate
